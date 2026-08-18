@@ -243,6 +243,35 @@
   .dot{width:6px;height:6px;border-radius:50%;background:var(--type-c,var(--general))}
 
 
+  .linkstat{
+    cursor:pointer;display:inline-flex;align-items:center;gap:6px;font-size:12.5px;font-weight:600;color:var(--muted);
+    font-family:var(--mono);white-space:nowrap;max-width:280px;overflow:hidden;text-overflow:ellipsis
+  }
+  .ld{width:7px;height:7px;border-radius:50%;flex:none}
+  .ld.ok{background:#12886F;box-shadow:0 0 0 3px rgba(18,136,111,.15)}
+  .ld.warn{background:#C88A00;box-shadow:0 0 0 3px rgba(200,138,0,.15)}
+  .ld.off{background:#AEB8C6}
+  .linkbox{padding:14px 16px;border:1px solid var(--line);border-radius:9px;margin-bottom:12px}
+  .linkbox h4{margin:0 0 5px;font-size:14.5px;font-weight:750}
+  .linkbox p{margin:0 0 11px;font-size:13.5px;line-height:1.6;color:var(--muted)}
+  .linkbox .primary,.linkbox .ghost{font-size:14px;padding:9px 16px}
+  .steps{margin:0;padding-left:18px;font-size:13.5px;line-height:1.75;color:var(--muted2)}
+  .steps li{margin-bottom:3px}
+
+  /* ── 확인 창 ── */
+  .confirm{max-width:420px}
+  .cf-title{margin:0 0 9px;font-size:17px;font-weight:800;letter-spacing:-.02em}
+  .cf-msg{margin:0;font-size:14.5px;line-height:1.65;color:var(--muted2)}
+  .cf-target{
+    margin-top:14px;padding:11px 13px;background:#F4F7FA;border-radius:8px;
+    font-size:14px;font-weight:650;line-height:1.5;color:var(--ink);
+    border-left:3px solid var(--type-c,var(--general))
+  }
+  .cf-actions{display:flex;gap:9px;justify-content:flex-end;padding:0 24px 22px}
+  .danger{background:var(--high);color:#fff;border:0;border-radius:8px;padding:11px 20px;font-size:15px;font-weight:700}
+  .danger:hover{background:#8B1A21}
+  .side .ghost[data-del]:hover{border-color:#E0B3B6;color:var(--high)}
+
   .mask{position:fixed;inset:0;background:rgba(17,21,26,.46);display:grid;place-items:center;padding:20px;z-index:60}
   .modal{background:var(--surface);border-radius:12px;max-width:640px;width:100%;max-height:88vh;overflow:auto;box-shadow:0 24px 64px rgba(17,21,26,.24)}
   .modal-h{display:flex;align-items:center;gap:10px;padding:16px 20px;border-bottom:1px solid var(--line-soft)}
@@ -315,8 +344,10 @@
       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
       <input id="q" type="search" placeholder="이슈 · 현장 · 품목 검색">
     </label>
-    <button class="ghost" id="btnExport">백업 저장</button>
-    <button class="ghost" id="btnImport">불러오기</button>
+    <span class="linkstat" id="linkStat" title="데이터 저장 위치"></span>
+    <button class="ghost" id="btnLink">저장 위치</button>
+    <button class="ghost" id="btnExport">파일로 내보내기</button>
+    <button class="ghost" id="btnImport">파일에서 불러오기</button>
     <input type="file" id="fileIn" accept="application/json" hidden>
   </div>
 </header>
@@ -443,6 +474,164 @@ const store = {
     try{ localStorage.setItem(KEY,s); }catch(e){}
   }
 };
+
+/* ─── 파일 연동(공유 폴더 저장) ─── */
+const supportsFS = typeof window.showSaveFilePicker === 'function';
+let fileHandle = null;      // 연결된 JSON 파일
+let lastSync = null;        // 마지막 저장 시각
+let linkState = 'none';     // none | linked | need-permission | error
+let saveTimer = null, syncing = false, lastPull = 0;
+
+const idb = {
+  open(){
+    return new Promise((res,rej)=>{
+      const r = indexedDB.open('arte-issue-checker', 1);
+      r.onupgradeneeded = ()=> r.result.createObjectStore('kv');
+      r.onsuccess = ()=> res(r.result);
+      r.onerror = ()=> rej(r.error);
+    });
+  },
+  async get(k){
+    try{
+      const db = await this.open();
+      return await new Promise((res,rej)=>{
+        const q = db.transaction('kv','readonly').objectStore('kv').get(k);
+        q.onsuccess = ()=> res(q.result); q.onerror = ()=> rej(q.error);
+      });
+    }catch(e){ return null; }
+  },
+  async set(k,v){
+    try{
+      const db = await this.open();
+      await new Promise((res,rej)=>{
+        const q = db.transaction('kv','readwrite').objectStore('kv').put(v,k);
+        q.onsuccess = res; q.onerror = ()=> rej(q.error);
+      });
+    }catch(e){}
+  },
+  async del(k){
+    try{
+      const db = await this.open();
+      await new Promise((res,rej)=>{
+        const q = db.transaction('kv','readwrite').objectStore('kv').delete(k);
+        q.onsuccess = res; q.onerror = ()=> rej(q.error);
+      });
+    }catch(e){}
+  }
+};
+
+function payload(){
+  return {app:'arte-issue-checker', version:2, savedAt:new Date().toISOString(), items:DATA};
+}
+
+/* 같은 id는 최근에 고친 쪽을 남기고 합친다 */
+function mergeItems(a, b){
+  const map = new Map();
+  [...(a||[]), ...(b||[])].forEach(it=>{
+    if(!it || !it.id) return;
+    const prev = map.get(it.id);
+    if(!prev || (it.updatedAt||it.createdAt||0) >= (prev.updatedAt||prev.createdAt||0)) map.set(it.id, it);
+  });
+  return [...map.values()];
+}
+
+async function ensurePermission(mode){
+  if(!fileHandle) return false;
+  try{
+    if(await fileHandle.queryPermission({mode}) === 'granted') return true;
+    if(await fileHandle.requestPermission({mode}) === 'granted') return true;
+  }catch(e){}
+  linkState = 'need-permission'; renderLink();
+  return false;
+}
+
+async function writeFile(){
+  if(!fileHandle) return;
+  if(!await ensurePermission('readwrite')) return;
+  try{
+    const w = await fileHandle.createWritable();
+    await w.write(JSON.stringify(payload(), null, 2));
+    await w.close();
+    lastSync = new Date(); linkState = 'linked'; renderLink();
+  }catch(e){ linkState = 'error'; renderLink(); }
+}
+
+function scheduleWrite(){
+  if(!fileHandle) return;
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(writeFile, 700);
+}
+
+async function pullFile({silent}={}){
+  if(!fileHandle || syncing) return;
+  if(!await ensurePermission('readwrite')) return;
+  syncing = true;
+  try{
+    const f = await fileHandle.getFile();
+    const txt = await f.text();
+    if(txt.trim()){
+      const j = JSON.parse(txt);
+      const items = Array.isArray(j) ? j : j.items;
+      if(Array.isArray(items)){
+        const before = DATA.length;
+        DATA = mergeItems(items, DATA);
+        lastSync = new Date(); linkState = 'linked';
+        renderAll(); renderLink();
+        await store.set(DATA);
+        if(!silent && DATA.length !== before) toast(`파일에서 ${DATA.length - before}건을 불러왔습니다`);
+      }
+    }
+  }catch(e){ linkState = 'error'; renderLink(); }
+  syncing = false;
+}
+
+async function linkFile(mode){
+  try{
+    if(mode === 'new'){
+      fileHandle = await window.showSaveFilePicker({
+        suggestedName: '아르떼조명상담이슈체커_데이터.json',
+        types: [{description:'이슈 데이터', accept:{'application/json':['.json']}}]
+      });
+      await idb.set('fileHandle', fileHandle);
+      linkState = 'linked';
+      await writeFile();
+      toast('저장 파일을 연결했습니다');
+    }else{
+      const [h] = await window.showOpenFilePicker({
+        types: [{description:'이슈 데이터', accept:{'application/json':['.json']}}]
+      });
+      fileHandle = h;
+      await idb.set('fileHandle', fileHandle);
+      linkState = 'linked';
+      await pullFile();
+      await writeFile();
+      toast('저장 파일을 연결했습니다');
+    }
+  }catch(e){ /* 사용자가 취소 */ }
+  renderLink();
+}
+
+async function unlinkFile(){
+  fileHandle = null; linkState = 'none'; lastSync = null;
+  await idb.del('fileHandle');
+  renderLink(); toast('연결을 해제했습니다');
+}
+
+function renderLink(){
+  const el = $('#linkStat'); if(!el) return;
+  const name = fileHandle ? fileHandle.name : '';
+  if(linkState === 'linked'){
+    const t = lastSync ? `${String(lastSync.getHours()).padStart(2,'0')}:${String(lastSync.getMinutes()).padStart(2,'0')} 저장됨` : '연결됨';
+    el.innerHTML = `<span class="ld ok"></span>${esc(name)} · ${t}`;
+    el.title = '자동 저장 중입니다';
+  }else if(linkState === 'need-permission'){
+    el.innerHTML = `<span class="ld warn"></span>연결 확인 필요`;
+  }else if(linkState === 'error'){
+    el.innerHTML = `<span class="ld warn"></span>저장 실패`;
+  }else{
+    el.innerHTML = `<span class="ld off"></span>이 브라우저에만 저장 중`;
+  }
+}
 
 /* ─────────── 유형 정의 ─────────── */
 const TYPES = {
@@ -771,14 +960,14 @@ function renderDash(){
 
   // 현장 요약
   const bySite = {};
-  scope.forEach(d=>{ const s=d.site||'현장 미지정'; (bySite[s]=bySite[s]||[]).push(d); });
+  scope.forEach(d=>{ if(!d.site) return; (bySite[d.site]=bySite[d.site]||[]).push(d); });
   const sites = Object.entries(bySite).sort((a,b)=>b[1].length-a[1].length).slice(0,8);
   $('#nSiteSum').textContent = `${Object.keys(bySite).length}곳`;
   $('#siteSum').innerHTML = sites.length ? sites.map(([s,arr])=>`
     <div class="prow">
       <div class="pname">${esc(s)}<span class="ps">${arr[0].date.slice(5).replace('-','/')} 최신</span></div>
       <div class="pnum">${arr.filter(d=>d.level==='high').length? `<span class="delta up">중요 ${arr.filter(d=>d.level==='high').length}</span>`:''} <span class="new">${arr.length}건</span></div>
-    </div>`).join('') : `<div class="empty"><b>현장 데이터 없음</b></div>`;
+    </div>`).join('') : `<div class="empty"><b>현장이 지정된 이슈가 없습니다</b>이슈에 현장명을 넣으면 여기에 모입니다.</div>`;
 }
 function priceText(p){
   return p.before ? `${esc(p.item)} ${won(p.before)} → ${won(p.after)}원` : `${esc(p.item)} ${won(p.after)}원`;
@@ -796,7 +985,7 @@ function renderList(){
   renderFilters();
   let arr = DATA.filter(matchQuery);
   if(typeFilter!=='all') arr = arr.filter(d=>d.type===typeFilter);
-  if(siteFilter) arr = arr.filter(d=>(d.site||'현장 미지정')===siteFilter);
+  if(siteFilter) arr = arr.filter(d=>d.site===siteFilter);
   arr.sort(sortByDate);
   $('#cntList').textContent = DATA.length;
 
@@ -827,7 +1016,7 @@ function renderList(){
 
 function renderSites(){
   const bySite = {};
-  DATA.filter(matchQuery).forEach(d=>{ const s=d.site||'현장 미지정'; (bySite[s]=bySite[s]||[]).push(d); });
+  DATA.filter(d=>d.site && matchQuery(d)).forEach(d=>{ (bySite[d.site]=bySite[d.site]||[]).push(d); });
   const entries = Object.entries(bySite).sort((a,b)=> b[1].length-a[1].length);
   $('#cntSite').textContent = entries.length;
   $('#siteGrid').innerHTML = entries.length ? entries.map(([s,arr])=>{
@@ -838,7 +1027,7 @@ function renderSites(){
       <div class="stats"><span>이슈 <b>${arr.length}</b></span><span>가격 <b>${pr}</b></span><span>주의 <b>${arr.filter(d=>d.type==='caution').length}</b></span></div>
       <div class="last">${arr[0].date.slice(5).replace('-','/')} · ${esc(arr[0].title)}</div>
     </button>`;
-  }).join('') : `<div class="empty"><b>등록된 현장이 없습니다</b></div>`;
+  }).join('') : `<div class="empty"><b>등록된 현장이 없습니다</b>현장명이 들어간 이슈만 여기에 표시됩니다. 이슈를 수정해 현장을 넣어보세요.</div>`;
 }
 
 function renderAll(){ renderDash(); renderList(); renderSites(); }
@@ -866,6 +1055,103 @@ function renderDrafts(){
       ${d.prices.length?`<div class="pchips">${d.prices.map(p=>`<span class="pchip">${priceText(p)}</span>`).join('')}</div>`:''}
     </div>`).join('');
 }
+
+/* ─────────── 저장 위치 창 ─────────── */
+function openLinkDialog(){
+  const mask = document.createElement('div');
+  mask.className = 'mask';
+  const status = linkState === 'linked'
+    ? `<b>${esc(fileHandle ? fileHandle.name : '')}</b> 파일에 자동 저장 중입니다.`
+    : linkState === 'need-permission'
+      ? '연결된 파일이 있지만 접근 권한이 끊겼습니다. 아래에서 다시 연결해 주세요.'
+      : '지금은 이 브라우저에만 저장됩니다. 다른 PC에서 열거나 브라우저 기록을 지우면 내용이 사라집니다.';
+
+  mask.innerHTML = `<div class="modal" role="dialog" aria-modal="true">
+    <div class="modal-h"><h3>데이터 저장 위치</h3><button class="ghost" id="lClose" style="margin-left:auto">닫기</button></div>
+    <div class="modal-b">
+      <p class="cf-msg" style="margin-bottom:16px">${status}</p>
+
+      ${supportsFS ? `
+      <div class="linkbox">
+        <h4>공유 폴더 파일에 자동 저장</h4>
+        <p>SharePoint·OneDrive 동기화 폴더 안의 JSON 파일 하나를 정해두면, 이슈를 등록·수정·삭제할 때마다 그 파일에 바로 저장됩니다. 다음에 앱을 열면 그 파일에서 내용을 그대로 불러옵니다.</p>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="primary" id="lNew">새 파일 만들기</button>
+          <button class="ghost" id="lOpen">기존 파일 연결</button>
+          ${fileHandle ? '<button class="ghost" id="lUnlink">연결 해제</button>' : ''}
+        </div>
+      </div>` : `
+      <div class="linkbox">
+        <h4>이 브라우저는 자동 저장을 지원하지 않습니다</h4>
+        <p>Chrome 또는 Edge에서 열면 공유 폴더 파일에 자동 저장할 수 있습니다. 그때까지는 아래 방법으로 파일을 직접 관리해 주세요.</p>
+      </div>`}
+
+      <div class="linkbox">
+        <h4>SharePoint에 두고 쓰는 방법</h4>
+        <ol class="steps">
+          <li>SharePoint 문서 라이브러리에서 <b>동기화</b>를 눌러 PC 탐색기에 폴더를 연결합니다.</li>
+          <li>그 폴더 안에 이 HTML 파일과 데이터 파일을 함께 둡니다.</li>
+          <li>위 <b>새 파일 만들기</b>로 그 폴더를 지정하면 이후 자동 저장됩니다.</li>
+          <li>다른 PC에서는 같은 폴더의 파일을 <b>기존 파일 연결</b>로 지정하면 됩니다.</li>
+        </ol>
+      </div>
+
+      <div class="linkbox" style="margin-bottom:0">
+        <h4>수동 백업</h4>
+        <p>연결과 별개로 <b>파일로 내보내기</b>는 언제든 쓸 수 있습니다. 불러올 때는 기존 내용을 지우지 않고 합칩니다.</p>
+      </div>
+    </div>
+  </div>`;
+  document.body.appendChild(mask);
+  const close = ()=> mask.remove();
+  mask.addEventListener('click', e=>{ if(e.target===mask) close(); });
+  mask.querySelector('#lClose').onclick = close;
+  const nw = mask.querySelector('#lNew'), op = mask.querySelector('#lOpen'), un = mask.querySelector('#lUnlink');
+  if(nw) nw.onclick = async ()=>{ close(); await linkFile('new'); };
+  if(op) op.onclick = async ()=>{ close(); await linkFile('open'); };
+  if(un) un.onclick = async ()=>{ close(); await unlinkFile(); };
+}
+
+/* ─────────── 확인 창 ─────────── */
+function askConfirm({title, message, target, type, confirmLabel, danger}){
+  return new Promise(resolve=>{
+    const mask = document.createElement('div');
+    mask.className = 'mask';
+    mask.style.zIndex = 70;
+    mask.innerHTML = `<div class="modal confirm" role="alertdialog" aria-modal="true" ${type?`style="${typeStyle(type)}"`:''}>
+      <div class="modal-b">
+        <h3 class="cf-title">${esc(title)}</h3>
+        <p class="cf-msg">${esc(message)}</p>
+        ${target ? `<div class="cf-target">${esc(target)}</div>` : ''}
+      </div>
+      <div class="cf-actions">
+        <button class="ghost" data-a="no">취소</button>
+        <button class="${danger?'danger':'primary'}" data-a="yes">${esc(confirmLabel)}</button>
+      </div>
+    </div>`;
+    document.body.appendChild(mask);
+    const done = v=>{ mask.remove(); document.removeEventListener('keydown', onKey); resolve(v); };
+    const onKey = e=>{ if(e.key==='Escape'){ e.stopPropagation(); done(false); } };
+    document.addEventListener('keydown', onKey);
+    mask.addEventListener('click', e=>{
+      if(e.target === mask) return done(false);
+      const a = e.target.closest('[data-a]');
+      if(a) done(a.dataset.a === 'yes');
+    });
+    mask.querySelector('[data-a="no"]').focus();   // 기본 포커스는 '취소'
+  });
+}
+
+const confirmEdit = d => askConfirm({
+  title:'이 이슈를 수정할까요?',
+  message:'편집 화면이 열립니다. 내용만 보려면 취소를 누르세요.',
+  target: d.title, type: d.type, confirmLabel:'수정하기'
+});
+const confirmDelete = d => askConfirm({
+  title:'이 이슈를 삭제할까요?',
+  message:'삭제하면 되돌릴 수 없습니다. 백업 파일에도 남지 않습니다.',
+  target: d.title, type: d.type, confirmLabel:'삭제하기', danger:true
+});
 
 /* ─────────── 본문 서식 ─────────── */
 function formatBody(text){
@@ -950,9 +1236,11 @@ function openView(d){
   document.addEventListener('keydown', onKey);
   mask.addEventListener('click', e=>{ if(e.target===mask) close(); });
   mask.querySelector('#vClose').onclick = close;
-  mask.querySelector('#vEdit').onclick = ()=>{ close(); openModal(d); };
+  mask.querySelector('#vEdit').onclick = async ()=>{
+    if(await confirmEdit(d)){ close(); openModal(d); }
+  };
   mask.querySelector('#vDel').onclick = async ()=>{
-    if(!confirm(`"${d.title}" 이슈를 삭제할까요?`)) return;
+    if(!await confirmDelete(d)) return;
     DATA = DATA.filter(x=>x.id!==d.id);
     await persist(); close(); renderAll(); toast('삭제했습니다');
   };
@@ -1001,18 +1289,23 @@ function openModal(item){
       type: $('#mType').value, level: $('#mLevel').value,
       title: $('#mTitle').value.trim() || '(제목 없음)', body: $('#mBody').value.trim(),
       prices: a ? [{item:item2||'단가', before:b, after:a}] : [],
-      createdAt: editing.createdAt || Date.now()
+      createdAt: editing.createdAt || Date.now(), updatedAt: Date.now()
     };
     const idx = DATA.findIndex(d=>d.id===obj.id);
     if(idx>=0) DATA[idx]=obj; else DATA.unshift(obj);
     await persist(); mask.remove(); renderAll(); toast(idx>=0?'수정했습니다':'등록했습니다');
   };
   if(item) $('#mDel').onclick = async ()=>{
+    if(!await confirmDelete(item)) return;
     DATA = DATA.filter(d=>d.id!==item.id); await persist(); mask.remove(); renderAll(); toast('삭제했습니다');
   };
 }
 
-async function persist(){ await store.set(DATA); }
+async function persist(){
+  DATA.forEach(d=>{ if(!d.updatedAt) d.updatedAt = d.createdAt || Date.now(); });
+  await store.set(DATA);
+  scheduleWrite();
+}
 
 /* ─────────── 이벤트 ─────────── */
 $$('.tab').forEach(b=> b.onclick = ()=>{
@@ -1075,7 +1368,7 @@ $('#drafts').addEventListener('click', e=>{
 
 $('#btnSave').onclick = async ()=>{
   if(!drafts.length) return;
-  DATA = [...drafts.map(d=>({...d})), ...DATA];
+  DATA = [...drafts.map(d=>({...d, updatedAt: Date.now()})), ...DATA];
   drafts = []; $('#raw').value=''; renderDrafts();
   await persist(); renderAll();
   toast('등록했습니다');
@@ -1090,13 +1383,20 @@ document.body.addEventListener('click', e=>{
     return;
   }
   const edit = e.target.closest('[data-edit]');
-  if(edit){ const d = DATA.find(x=>x.id===edit.dataset.edit); if(d) openModal(d); return; }
+  if(edit){
+    const d = DATA.find(x=>x.id===edit.dataset.edit);
+    if(d) confirmEdit(d).then(ok=>{ if(ok) openModal(d); });
+    return;
+  }
   const del = e.target.closest('[data-del]');
   if(del){
     const d = DATA.find(x=>x.id===del.dataset.del);
-    if(d && confirm(`"${d.title}" 이슈를 삭제할까요?`)){
-      DATA = DATA.filter(x=>x.id!==d.id); persist().then(renderAll); toast('삭제했습니다');
-    } return;
+    if(d) confirmDelete(d).then(async ok=>{
+      if(!ok) return;
+      DATA = DATA.filter(x=>x.id!==d.id);
+      await persist(); renderAll(); toast('삭제했습니다');
+    });
+    return;
   }
   const read = e.target.closest('[data-read]');
   if(read){ const d = DATA.find(x=>x.id===read.dataset.read); if(d) openView(d); return; }
@@ -1109,8 +1409,11 @@ document.body.addEventListener('click', e=>{
   if(fc){ typeFilter = fc.dataset.t; renderList(); }
 });
 
+$('#btnLink').onclick = openLinkDialog;
+$('#linkStat').onclick = openLinkDialog;
+
 $('#btnExport').onclick = ()=>{
-  const blob = new Blob([JSON.stringify({app:'arte-issue-checker', version:1, exportedAt:new Date().toISOString(), items:DATA}, null, 2)], {type:'application/json'});
+  const blob = new Blob([JSON.stringify(payload(), null, 2)], {type:'application/json'});
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = `아르떼조명상담이슈체커_백업_${todayStr()}.json`;
@@ -1126,16 +1429,24 @@ $('#fileIn').onchange = e=>{
       const j = JSON.parse(r.result);
       const items = Array.isArray(j) ? j : j.items;
       if(!Array.isArray(items)) throw 0;
-      const ids = new Set(DATA.map(d=>d.id));
-      const add = items.filter(d=>!ids.has(d.id));
-      DATA = [...add, ...DATA];
+      const before = DATA.length;
+      DATA = mergeItems(items, DATA);           // 기존 내용을 지우지 않고 합친다
       await persist(); renderAll();
-      toast(`${add.length}건을 불러왔습니다`);
+      toast(`불러왔습니다 (새 이슈 ${DATA.length - before}건)`);
     }catch(err){ toast('이 파일은 읽을 수 없습니다'); }
     e.target.value='';
   };
   r.readAsText(f);
 };
+
+/* 창을 다시 열거나 돌아오면 공유 파일 쪽 변경을 반영 */
+window.addEventListener('focus', ()=>{
+  if(!fileHandle || linkState !== 'linked') return;
+  if(Date.now() - lastPull < 5000) return;
+  lastPull = Date.now();
+  pullFile({silent:true});
+});
+window.addEventListener('beforeunload', ()=>{ if(fileHandle) writeFile(); });
 
 /* ─────────── 시작 ─────────── */
 (async function init(){
@@ -1145,6 +1456,24 @@ $('#fileIn').onchange = e=>{
   DATA = Array.isArray(saved) ? saved : [];
   renderDrafts();
   renderAll();
+  renderLink();
+
+  // 이전에 연결해 둔 파일이 있으면 복구
+  if(supportsFS){
+    const h = await idb.get('fileHandle');
+    if(h){
+      fileHandle = h;
+      try{
+        if(await fileHandle.queryPermission({mode:'readwrite'}) === 'granted'){
+          linkState = 'linked';
+          await pullFile({silent:true});
+        }else{
+          linkState = 'need-permission';
+        }
+      }catch(e){ linkState = 'need-permission'; }
+      renderLink();
+    }
+  }
 })();
 </script>
 </body>
