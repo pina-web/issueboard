@@ -377,6 +377,7 @@ window.arteNavSet=function(key){
   hs.forEach(function(a){if(a!==on)a.removeAttribute('aria-current')});
   center(on);
 };
+[].forEach.call(bar.querySelectorAll('a[target=_blank]'),function(a){a.addEventListener('click',function(e){if(e.ctrlKey||e.metaKey||e.shiftKey||e.button)return;var aw=screen.availWidth||1280,ah=screen.availHeight||800,w=Math.min(1280,aw-80),h=Math.min(860,ah-80);var win=null;try{win=window.open(a.href,'arteExt','popup=yes,width='+w+',height='+h+',left='+Math.round((aw-w)/2)+',top='+Math.round((ah-h)/2))}catch(x){}if(win){try{win.opener=null}catch(x){}e.preventDefault();win.focus&&win.focus()}})});
 fit();window.addEventListener('resize',fit);window.addEventListener('load',function(){fit();center(bar.querySelector('a.on'))});
 if(window.ResizeObserver){try{new ResizeObserver(fit).observe(bar)}catch(e){}}
 window.addEventListener('hashchange',function(){window.arteNavSet()});
