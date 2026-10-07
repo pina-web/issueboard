@@ -341,7 +341,7 @@
   }
   @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
 </style>
-<style id="arteWidthCss">/* 본문 폭 = 상단 메뉴바 기준 통일 */.wrap,.topbar-in{max-width:1536px!important}</style></head>
+<style id="arteWidthCss">/* 본문 폭 = 상단 메뉴바 기준 통일 */.wrap,.topbar-in{max-width:1536px!important}</style><style id="atTtlCss">/* 페이지 제목 공통 (ARTE + 제목 + 영문 부제) — 시공자재 리스트 기준 */.at-ttl{display:flex;flex-direction:column;align-items:flex-start;gap:3px;margin:0;line-height:1.35;text-align:left;font-family:'Pretendard','Apple SD Gothic Neo','Malgun Gothic','Noto Sans KR',sans-serif}.at-ttl .r{display:flex;align-items:center;gap:18px}.at-ttl .a{font-size:22px;letter-spacing:5px;color:#9b7e6f;font-weight:600}.at-ttl .t{font-size:17px;color:#454541;font-weight:500;white-space:nowrap;letter-spacing:0}.at-ttl small{display:block;font-size:11px;color:#777770;letter-spacing:1px;font-weight:400}.at-ttl.mini .a{font-size:17px;letter-spacing:4px}.at-ttl.mini .t{font-size:14px}.at-ttl.mini .r{gap:12px}@media(max-width:600px){.at-ttl .a{font-size:19px;letter-spacing:4px}.at-ttl .t{font-size:15px}.at-ttl .r{gap:12px}}</style></head>
 <body>
 <!--ARTE-BAR-->
 <style id="arteBarCss">:root{--anav-h:63px}
@@ -408,10 +408,7 @@ window.arteNavSet();
 
 <header class="topbar">
   <div class="topbar-in">
-    <div class="brand">
-      <h1>아르떼조명상담이슈체커</h1>
-      <span class="sub">CS ISSUE BOARD</span>
-    </div>
+    <div class="brand"><div class="at-ttl"><div class="r"><span class="a">ARTE</span><span class="t">이슈체커</span></div><small>CS · ISSUE BOARD</small></div></div>
     <span class="today" id="today"></span>
     <label class="search">
       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
