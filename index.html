@@ -474,6 +474,15 @@
 .imgstrip.sm .ith{width:62px;height:62px}
 .imgnote{font-size:13px;color:var(--muted);margin-top:7px}
 .draft.droptarget{background:#EEF5FF;outline:2px dashed var(--accent);outline-offset:-4px}
+/* 붙여넣은 표 */
+.vhtml{font-size:14.5px;line-height:1.7;overflow-x:auto}
+.vhtml table{border-collapse:collapse;width:100%;margin:10px 0;font-size:14px;background:#fff}
+.vhtml th,.vhtml td{border:1px solid var(--line);padding:7px 10px;text-align:left;vertical-align:top;white-space:pre-wrap}
+.vhtml th{background:#F2F5F9;font-weight:700}
+.vhtml p,.vhtml div{margin:0 0 6px}
+.vhtml ul,.vhtml ol{margin:6px 0 6px 20px}
+.vhtml.mini{max-height:220px;overflow:auto;margin-top:10px;border:1px solid var(--line-soft);border-radius:8px;padding:8px 10px;font-size:13px}
+.vhtml.mini table{font-size:12.5px}
 .vimgs{display:grid;gap:10px;margin:14px 0 4px}
 .vimgs img{width:100%;border-radius:12px;border:1px solid var(--line);cursor:zoom-in;display:block}
 .lightbox{position:fixed;inset:0;z-index:9500;background:rgba(10,12,15,.92);display:grid;place-items:center;padding:20px}
@@ -972,26 +981,92 @@ async function urlToImg(url){
   }
 }
 
-/* 붙여넣은 HTML(카톡·메일·한글·웹페이지)에서 글과 사진을 함께 뽑는다 */
+/* 이모티콘·아이콘처럼 내용이 없는 그림은 걸러낸다 (팀즈 이모지 포함) */
+const SKIP_IMG = /emoji|emoticon|sticker|icon|avatar|spacer|blank\.gif|presence|reaction|badge/i;
+function isDecorImg(im){
+  const src = im.getAttribute('src') || '';
+  const meta = [im.getAttribute('itemtype'), im.getAttribute('itemid'), im.className, im.getAttribute('alt'), im.getAttribute('title')].join(' ');
+  if(SKIP_IMG.test(src) || SKIP_IMG.test(meta)) return true;
+  const w = parseInt(im.getAttribute('width')||'0',10), h = parseInt(im.getAttribute('height')||'0',10);
+  if((w && w <= 64) || (h && h <= 64)) return true;
+  const st = im.getAttribute('style') || '';
+  const mw = st.match(/width\s*:\s*(\d+(?:\.\d+)?)px/), mh = st.match(/height\s*:\s*(\d+(?:\.\d+)?)px/);
+  if((mw && +mw[1] <= 64) || (mh && +mh[1] <= 64)) return true;
+  const alt = im.getAttribute('alt') || '';
+  if(alt && alt.length <= 4 && !/[A-Za-z0-9가-힣]/.test(alt)) return true;   // 알트가 이모지뿐
+  return false;
+}
+
+/* 표·목록 같은 모양은 살리고 나머지 꾸밈은 걷어낸다 */
+const KEEP_TAGS = new Set(['TABLE','THEAD','TBODY','TFOOT','TR','TH','TD','CAPTION','COLGROUP','COL','UL','OL','LI','B','STRONG','I','EM','U','S','BR','P','DIV','SPAN','H1','H2','H3','H4','BLOCKQUOTE','CODE','PRE']);
+const KEEP_ATTR = new Set(['colspan','rowspan']);
+function sanitizeNode(node){
+  [...node.children].forEach(el=>{
+    if(!KEEP_TAGS.has(el.tagName)){
+      const txt = document.createTextNode(el.textContent || '');
+      el.replaceWith(txt);
+      return;
+    }
+    [...el.attributes].forEach(a=>{ if(!KEEP_ATTR.has(a.name.toLowerCase())) el.removeAttribute(a.name); });
+    sanitizeNode(el);
+  });
+  return node;
+}
+
+/* 붙여넣은 HTML(팀즈·카톡·메일·한글·웹페이지)에서 글·표·사진을 함께 뽑는다 */
 function readPastedHtml(html){
   const doc = new DOMParser().parseFromString(html, 'text/html');
-  doc.querySelectorAll('script,style').forEach(n=>n.remove());
-  const urls = [...doc.querySelectorAll('img')].map(im=> im.getAttribute('src')||'').filter(Boolean).slice(0,20);
+  doc.querySelectorAll('script,style,noscript').forEach(n=>n.remove());
+
+  const urls = [];
+  doc.querySelectorAll('img').forEach(im=>{
+    const src = im.getAttribute('src') || '';
+    if(src && !isDecorImg(im) && urls.length < 20) urls.push(src);
+    im.remove();                                  // 사진은 따로 담으므로 본문에서는 뺀다
+  });
+
+  /* 표가 있으면 표 모양 그대로 보관 */
+  let tableHtml = '';
+  if(doc.querySelector('table')){
+    const box = document.createElement('div');
+    box.innerHTML = doc.body ? doc.body.innerHTML : '';
+    sanitizeNode(box);
+    box.querySelectorAll('div,p,span').forEach(el=>{
+      if(!el.textContent.trim() && !el.querySelector('table,br')) el.remove();
+    });
+    tableHtml = box.innerHTML.trim().slice(0, 120000);
+  }
+
   doc.querySelectorAll('br').forEach(n=> n.replaceWith('\n'));
+  doc.querySelectorAll('th,td').forEach(n=> n.append('\t'));
   doc.querySelectorAll('p,div,li,tr,h1,h2,h3,h4').forEach(n=> n.append('\n'));
   const text = (doc.body ? doc.body.textContent : '')
     .replace(/\u00a0/g,' ')
-    .split('\n').map(l=>l.replace(/[ \t]+/g,' ').trim()).join('\n')
+    .split('\n').map(l=>l.replace(/[ \t]+$/,'').replace(/^[ \t]+/,'').replace(/ {2,}/g,' ')).join('\n')
     .replace(/\n{3,}/g,'\n\n').trim();
-  return {text, urls};
+  return {text, urls, tableHtml};
+}
+
+function canLoad(url){
+  return new Promise(res=>{
+    const im = new Image();
+    const done = v =>{ clearTimeout(t); im.onload=im.onerror=null; res(v); };
+    const t = setTimeout(()=>done(false), 5000);
+    im.onload = ()=> done(im.naturalWidth > 64 && im.naturalHeight > 64);
+    im.onerror = ()=> done(false);
+    im.src = url;
+  });
 }
 
 async function urlsToImgs(urls){
-  const out = [];
+  const out = []; let lost = 0;
   for(const u of urls){
     const g = await urlToImg(u);
-    if(g) out.push(g);
+    if(!g){ lost++; continue; }
+    if(g.u && !(await canLoad(g.u))){ lost++; continue; }   // 로그인이 걸린 주소 등은 버린다
+    out.push(g);
   }
+  if(lost) toast(`사진 ${lost}장은 가져오지 못했습니다 — 그 사진만 따로 복사해 붙여넣어 주세요`);
   return out;
 }
 
@@ -1021,23 +1096,28 @@ function attachImgs(imgs, idx){
 }
 
 /* 텍스트를 다시 분석할 때 이미 붙여 둔 사진은 살려 둔다 */
+let pendTable = '';
 function reparse(mode){
   const carry = drafts.flatMap(d=>d.imgs||[]);
+  const carryHtml = pendTable || (drafts[0] && drafts[0].html) || '';
   drafts = parseBlocks($('#raw').value, mode || splitMode);
+  if(carryHtml && drafts[0]) drafts[0].html = carryHtml;
   if(carry.length) attachImgs(carry, 0); else renderDrafts();
 }
 
 /* 붙여넣기·끌어다 놓기 공통 — 글과 사진을 받은 그대로 한 건에 담는다 */
-async function intake({text, files, urls}){
+async function intake({text, files, urls, tableHtml}){
   files = files || []; urls = urls || []; text = (text||'').trim();
   if(!text && !files.length && !urls.length) return false;
+  pendTable = tableHtml || '';
   goAddTab();
   if(text){
     const cur = $('#raw').value;
     $('#raw').value = cur.trim() ? cur.replace(/\s+$/,'') + '\n\n' + text : text;
   }
   const withImg = files.length || urls.length;
-  if(withImg){                                   // 사진이 같이 오면 글도 통째로 한 건
+  if(pendTable && drafts.length){ drafts[0].html = pendTable; renderDrafts(); }
+  if(withImg || pendTable){                      // 사진·표가 같이 오면 글도 통째로 한 건
     splitMode = 'one';
     const seg = $('#modeSeg');
     if(seg) [...seg.children].forEach(x=> x.setAttribute('aria-pressed', x.dataset.m === 'one'));
@@ -1059,17 +1139,17 @@ async function handleDropped(dt){
   const files = [...(dt.files||[])];
   const imgFiles = files.filter(f=>/^image\//.test(f.type) || /\.(png|jpe?g|gif|webp|bmp|heic|heif)$/i.test(f.name));
   const txtFiles = files.filter(f=>!imgFiles.includes(f) && (/^text\//.test(f.type) || /\.(txt|md|csv|log)$/i.test(f.name)));
-  let text = '', urls = [];
+  let text = '', urls = [], tableHtml = '';
   try{
     const html = dt.getData ? (dt.getData('text/html') || '') : '';
-    if(html){ const r = readPastedHtml(html); text = r.text; urls = r.urls; }
+    if(html){ const r = readPastedHtml(html); text = r.text; urls = r.urls; tableHtml = r.tableHtml; }
     if(!text) text = dt.getData ? (dt.getData('text/plain') || '') : '';
   }catch(e){}
   for(const f of txtFiles){
     try{ text += (text?'\n\n':'') + await f.text(); }catch(e){}
   }
   if(imgFiles.length) urls = [];                 // 실제 파일이 있으면 그걸 쓴다
-  const ok = await intake({text, files:imgFiles, urls});
+  const ok = await intake({text, files:imgFiles, urls, tableHtml});
   if(!ok) toast('넣을 수 있는 글이나 사진이 없습니다');
 }
 
@@ -1118,7 +1198,7 @@ function guessLevel(text){
   return 'mid';
 }
 
-function extractPrices(text){
+function extractPrices(text, strict){
   const out = [];
   const re = /([가-힣A-Za-z0-9()·\-\s]{0,18}?)\s*(?:단가|가격|금액)?\s*([\d][\d,]{1,})\s*원?\s*(?:→|->|=>|➡|에서)\s*([\d][\d,]{1,})\s*원/g;
   let m;
@@ -1128,7 +1208,7 @@ function extractPrices(text){
     if(!before || !after) continue;
     out.push({item: cleanItem(m[1]) || '단가', before, after});
   }
-  if(out.length) return out;
+  if(out.length || strict) return out;      // 표를 붙여넣은 경우엔 떠도는 금액은 줍지 않는다
   const re2 = /([가-힣A-Za-z0-9()·\-\s]{0,18}?)\s*(?:단가|가격|금액)?\s*([\d][\d,]{2,})\s*원/g;
   while((m = re2.exec(text))){
     const v = parseInt(m[2].replace(/,/g,''),10);
@@ -1157,7 +1237,7 @@ function parseOne(text){
   const site = guessSite(t);
   const type = guessType(t);
   const level = guessLevel(t);
-  const prices = extractPrices(t);
+  const prices = extractPrices(t, /\t/.test(t));   // 표에서 온 글은 엄격하게
 
   const lines = t.split('\n').map(stripMeta).filter(Boolean);
   const full = lines.join('\n');
@@ -1209,7 +1289,8 @@ function inRange(d){
   return new Date(d.date+'T00:00:00') >= from;
 }
 function haystack(d){
-  return [d.title, d.body, d.raw, d.site, TYPES[d.type].label, (d.prices||[]).map(p=>p.item).join(' ')].filter(Boolean).join(' ');
+  return [d.title, d.body, d.raw, d.site, TYPES[d.type].label, (d.prices||[]).map(p=>p.item).join(' '),
+          d.html ? d.html.replace(/<[^>]+>/g,' ') : ''].filter(Boolean).join(' ');
 }
 function matchQuery(d){
   if(!query) return true;
@@ -1316,7 +1397,7 @@ const GLYPH = {price:'₩', caution:'!', notice:'공지', general:'메모'};
 function coverHtml(d){
   const flag = d.level==='high' ? '<span class="ic-badge">중요</span>' : '';
   if(d.imgs && d.imgs.length){
-    return `<span class="ic-cover"><img src="${imgSrc(d.imgs[0])}" alt="">${d.imgs.length>1?`<i>사진 ${d.imgs.length}</i>`:''}${flag}</span>`;
+    return `<span class="ic-cover"><img src="${imgSrc(d.imgs[0])}" alt="" onerror="this.style.display='none'">${d.imgs.length>1?`<i>사진 ${d.imgs.length}</i>`:''}${flag}</span>`;
   }
   const p = (d.prices||[])[0];
   if(p && p.after){
@@ -1324,6 +1405,7 @@ function coverHtml(d){
     const pct = p.before ? Math.abs((p.after-p.before)/p.before*100).toFixed(0) : null;
     return `<span class="ic-cover gen"><b class="full">${won(p.after)}<em>원</em></b><b class="mini">${up===true?'▲':(p.before?'▼':'₩')}</b>${p.before?`<s>${won(p.before)}원</s><u class="${up?'up':'down'}">${up?'▲':'▼'}${pct}%</u>`:`<span class="g-label">${esc(p.item||'금액')}</span>`}${flag}</span>`;
   }
+  if(d.html) return `<span class="ic-cover gen"><b>표</b><span class="g-label">${TYPES[d.type].label}</span>${flag}</span>`;
   return `<span class="ic-cover gen"><b>${GLYPH[d.type]||'메모'}</b><span class="g-label">${TYPES[d.type].label}</span>${flag}</span>`;
 }
 
@@ -1537,6 +1619,7 @@ function renderDrafts(){
       <input class="t" type="text" value="${esc(d.title)}" data-i="${i}" data-f="title">
       ${d.body?`<div class="body">${esc(d.body)}</div>`:''}
       ${d.prices.length?`<div class="pchips">${d.prices.map(p=>`<span class="pchip">${priceText(p)}</span>`).join('')}</div>`:''}
+      ${d.html?`<div class="vhtml mini">${d.html}</div>`:''}
       ${(d.imgs&&d.imgs.length)?`<div class="imgstrip">${d.imgs.map((g,k)=>`<span class="ith"><img src="${imgSrc(g)}" alt=""><button class="x" data-rmimg="${i}:${k}" title="사진 빼기">×</button></span>`).join('')}</div>`:''}
       ${(d.imgs&&d.imgs.length)?`<div class="imgnote">사진 ${d.imgs.length}장이 이 이슈에 함께 등록됩니다. 다른 이슈로 옮기려면 그 카드 위로 끌어다 놓으세요.</div>`:''}
     </div>`).join('');
@@ -1709,8 +1792,8 @@ function openView(d){
           <div class="pnum">${p.before?`<span class="old">${won(p.before)}</span>`:''}<span class="new">${won(p.after)}원</span>${delta}</div>
         </div>`;
       }).join('')}</div>` : ''}
-      ${(d.imgs&&d.imgs.length)?`<div class="vimgs">${d.imgs.map(g=>`<img src="${imgSrc(g)}" alt="" data-zoom="1">`).join('')}</div>`:''}
-      <div class="vbody">${formatBody(d.raw || d.body || '')}</div>
+      ${(d.imgs&&d.imgs.length)?`<div class="vimgs">${d.imgs.map(g=>`<img src="${imgSrc(g)}" alt="" data-zoom="1" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'imgnote',textContent:'이 사진은 원본 링크라 지금 열리지 않습니다'}))">`).join('')}</div>`:''}
+      ${d.html ? `<div class="vbody vhtml">${d.html}</div>` : `<div class="vbody">${formatBody(d.raw || d.body || '')}</div>`}
     </div>
     <div class="bar">
       <button class="primary" id="vEdit">수정</button>
@@ -1817,6 +1900,7 @@ function openModal(item){
       type: $('#mType').value, level: $('#mLevel').value,
       title: $('#mTitle').value.trim() || '(제목 없음)', body: $('#mBody').value.trim(),
       raw: ($('#mBody').value.trim() === (editing.body||'')) ? (editing.raw||'') : '',
+      html: ($('#mBody').value.trim() === (editing.body||'')) ? (editing.html||'') : '',
       prices: a ? [{item:item2||'단가', before:b, after:a}] : [],
       imgs: editing.imgs || [],
       createdAt: editing.createdAt || Date.now(), updatedAt: Date.now()
@@ -1882,7 +1966,7 @@ $('#btnParse').onclick = ()=>{
   reparse();
   toast(`${drafts.length}건으로 분류했습니다`);
 };
-$('#btnClearRaw').onclick = ()=>{ $('#raw').value=''; drafts=[]; renderDrafts(); };
+$('#btnClearRaw').onclick = ()=>{ $('#raw').value=''; drafts=[]; pendTable=''; renderDrafts(); };
 $('#btnManual').onclick = ()=> openModal(null);
 
 $('#drafts').addEventListener('input', e=>{
@@ -1925,7 +2009,7 @@ $('#drafts').addEventListener('drop', async e=>{
 $('#btnSave').onclick = async ()=>{
   if(!drafts.length) return;
   DATA = [...drafts.map(d=>({...d, updatedAt: Date.now()})), ...DATA];
-  drafts = []; $('#raw').value=''; renderDrafts();
+  drafts = []; pendTable = ''; $('#raw').value=''; renderDrafts();
   allShown = Math.max(allShown, 60);
   await persist(); renderAll();
   toast('등록했습니다');
@@ -2018,10 +2102,10 @@ document.addEventListener('paste', async e=>{
   const fs = [...(cd.items||[])].filter(i=>i.kind==='file' && /^image\//.test(i.type)).map(i=>i.getAsFile()).filter(Boolean);
   const html = cd.getData('text/html') || '';
   const plain = cd.getData('text/plain') || '';
-  let text = plain, urls = [];
+  let text = plain, urls = [], tableHtml = '';
   if(html){
     const r = readPastedHtml(html);
-    urls = r.urls;
+    urls = r.urls; tableHtml = r.tableHtml;
     if(!text.trim() || r.text.length > text.length) text = r.text;   // 줄바꿈이 살아 있는 쪽을 쓴다
   }
   if(fs.length) urls = urls.filter(u=>/^https?:/i.test(u));          // 캡처 파일이 있으면 중복 방지
@@ -2030,7 +2114,7 @@ document.addEventListener('paste', async e=>{
   if(!fs.length && !urls.length && inField) return;  // 입력칸에 글만 붙여넣는 건 그대로 둔다
   if(!fs.length && !urls.length && !text.trim()) return;
   e.preventDefault();
-  await intake({text, files:fs, urls});
+  await intake({text, files:fs, urls, tableHtml});
 });
 
 /* 전체 이슈 패널 */
