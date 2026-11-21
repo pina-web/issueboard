@@ -652,7 +652,7 @@ window.arteNavSet();
         <div class="panel-h"><h2>내용 붙여넣기</h2></div>
         <div class="dropzone" id="dropZone">
           <b>여기로 끌어다 놓으세요</b>
-          <span>글과 사진을 함께 놓으면 한 건으로 등록됩니다 · <code>Ctrl+V</code> 도 가능</span>
+          <span>복사한 글과 사진을 <code>Ctrl+V</code> 로 붙여넣거나 끌어다 놓으면 그대로 한 건이 됩니다</span>
           <button class="ghost" id="pickImg">사진 고르기</button>
           <input type="file" id="imgIn" accept="image/*" multiple hidden>
         </div>
@@ -924,9 +924,9 @@ const won = n => Number(n).toLocaleString('ko-KR');
 const todayStr = () => new Date().toISOString().slice(0,10);
 
 /* ─────────── 사진 (드래그앤드롭) ─────────── */
-const IMG_MAX = 1280;          // 긴 변 기준 축소 크기
-const IMG_Q   = 0.72;          // webp 품질
-const IMG_CAP = 420000;        // 한 장 목표 용량(문자 수)
+const IMG_MAX = 860;           // 긴 변 기준 축소 크기 (내용 확인용이면 충분)
+const IMG_Q   = 0.6;           // webp 품질
+const IMG_CAP = 160000;        // 한 장 목표 용량(문자 수) — 대략 120KB
 
 function loadImgEl(file){
   return new Promise((res,rej)=>{
@@ -952,10 +952,47 @@ async function shrinkImage(file, max=IMG_MAX, q=IMG_Q){
   cv.getContext('2d').drawImage(src,0,0,w,h);
   if(src.close) src.close();
   let d = cv.toDataURL('image/webp', q);
-  if(d.indexOf('image/webp') < 0) d = cv.toDataURL('image/jpeg', 0.8);
-  if(d.length > IMG_CAP && Math.max(w,h) > 900) return shrinkImage(file, 900, 0.64);
-  if(d.length > IMG_CAP) d = cv.toDataURL(d.indexOf('image/webp')>0 ? 'image/webp':'image/jpeg', 0.5);
+  if(d.indexOf('image/webp') < 0) d = cv.toDataURL('image/jpeg', 0.75);
+  if(d.length > IMG_CAP && Math.max(w,h) > 640) return shrinkImage(file, 640, 0.52);
+  if(d.length > IMG_CAP) d = cv.toDataURL(d.indexOf('image/webp')>0 ? 'image/webp':'image/jpeg', 0.42);
   return {d, w, h, n:(file.name||'').slice(0,60)};
+}
+
+const imgSrc = g => (g && (g.d || g.u)) || '';
+
+/* dataURL·웹주소 이미지를 그림 데이터로 */
+async function urlToImg(url){
+  try{
+    const res = await fetch(url);
+    const blob = await res.blob();
+    if(!/^image\//.test(blob.type||'')) throw 0;
+    return await shrinkImage(new File([blob], 'paste', {type:blob.type}));
+  }catch(e){
+    return /^https?:/i.test(url) ? {u:url, n:url.slice(0,60)} : null;   // 못 가져오면 주소로 연결
+  }
+}
+
+/* 붙여넣은 HTML(카톡·메일·한글·웹페이지)에서 글과 사진을 함께 뽑는다 */
+function readPastedHtml(html){
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+  doc.querySelectorAll('script,style').forEach(n=>n.remove());
+  const urls = [...doc.querySelectorAll('img')].map(im=> im.getAttribute('src')||'').filter(Boolean).slice(0,20);
+  doc.querySelectorAll('br').forEach(n=> n.replaceWith('\n'));
+  doc.querySelectorAll('p,div,li,tr,h1,h2,h3,h4').forEach(n=> n.append('\n'));
+  const text = (doc.body ? doc.body.textContent : '')
+    .replace(/\u00a0/g,' ')
+    .split('\n').map(l=>l.replace(/[ \t]+/g,' ').trim()).join('\n')
+    .replace(/\n{3,}/g,'\n\n').trim();
+  return {text, urls};
+}
+
+async function urlsToImgs(urls){
+  const out = [];
+  for(const u of urls){
+    const g = await urlToImg(u);
+    if(g) out.push(g);
+  }
+  return out;
 }
 
 async function filesToImgs(files){
@@ -984,10 +1021,36 @@ function attachImgs(imgs, idx){
 }
 
 /* 텍스트를 다시 분석할 때 이미 붙여 둔 사진은 살려 둔다 */
-function reparse(){
+function reparse(mode){
   const carry = drafts.flatMap(d=>d.imgs||[]);
-  drafts = parseBlocks($('#raw').value, splitMode);
+  drafts = parseBlocks($('#raw').value, mode || splitMode);
   if(carry.length) attachImgs(carry, 0); else renderDrafts();
+}
+
+/* 붙여넣기·끌어다 놓기 공통 — 글과 사진을 받은 그대로 한 건에 담는다 */
+async function intake({text, files, urls}){
+  files = files || []; urls = urls || []; text = (text||'').trim();
+  if(!text && !files.length && !urls.length) return false;
+  goAddTab();
+  if(text){
+    const cur = $('#raw').value;
+    $('#raw').value = cur.trim() ? cur.replace(/\s+$/,'') + '\n\n' + text : text;
+  }
+  const withImg = files.length || urls.length;
+  if(withImg){                                   // 사진이 같이 오면 글도 통째로 한 건
+    splitMode = 'one';
+    const seg = $('#modeSeg');
+    if(seg) [...seg.children].forEach(x=> x.setAttribute('aria-pressed', x.dataset.m === 'one'));
+  }
+  if(text || !drafts.length) reparse();
+  if(withImg){
+    toast(`사진 ${files.length + urls.length}장을 넣는 중…`);
+    const imgs = [...await filesToImgs(files), ...await urlsToImgs(urls)];
+    attachImgs(imgs, 0);
+  }
+  const n1 = drafts.length, n2 = drafts.reduce((a,d)=>a+((d.imgs||[]).length),0);
+  if(n1) toast(`${n1}건${n2?` · 사진 ${n2}장`:''} — 확인 후 등록하기를 누르세요`);
+  return true;
 }
 
 function goAddTab(){ $$('.tab')[1].click(); }
@@ -996,27 +1059,18 @@ async function handleDropped(dt){
   const files = [...(dt.files||[])];
   const imgFiles = files.filter(f=>/^image\//.test(f.type) || /\.(png|jpe?g|gif|webp|bmp|heic|heif)$/i.test(f.name));
   const txtFiles = files.filter(f=>!imgFiles.includes(f) && (/^text\//.test(f.type) || /\.(txt|md|csv|log)$/i.test(f.name)));
-  let text = '';
-  try{ text = dt.getData ? (dt.getData('text/plain') || '') : ''; }catch(e){}
+  let text = '', urls = [];
+  try{
+    const html = dt.getData ? (dt.getData('text/html') || '') : '';
+    if(html){ const r = readPastedHtml(html); text = r.text; urls = r.urls; }
+    if(!text) text = dt.getData ? (dt.getData('text/plain') || '') : '';
+  }catch(e){}
   for(const f of txtFiles){
     try{ text += (text?'\n\n':'') + await f.text(); }catch(e){}
   }
-  if(!imgFiles.length && !text.trim()) return toast('넣을 수 있는 글이나 사진이 없습니다');
-
-  goAddTab();
-  if(text.trim()){
-    const cur = $('#raw').value;
-    $('#raw').value = cur.trim() ? cur.replace(/\s+$/,'') + '\n\n' + text.trim() : text.trim();
-  }
-  if(text.trim() || drafts.length === 0) reparse();
-
-  if(imgFiles.length){
-    toast(`사진 ${imgFiles.length}장을 넣는 중…`);
-    const imgs = await filesToImgs(imgFiles);
-    attachImgs(imgs, 0);
-  }
-  const n1 = drafts.length, n2 = drafts.reduce((a,d)=>a+((d.imgs||[]).length),0);
-  if(n1) toast(`${n1}건 · 사진 ${n2}장 — 확인 후 등록하기를 누르세요`);
+  if(imgFiles.length) urls = [];                 // 실제 파일이 있으면 그걸 쓴다
+  const ok = await intake({text, files:imgFiles, urls});
+  if(!ok) toast('넣을 수 있는 글이나 사진이 없습니다');
 }
 
 function toast(msg){
@@ -1123,7 +1177,7 @@ function parseOne(text){
   }
   if(!title) title = TYPES[type].label;
 
-  return {id:uid(), date, site, type, level, title, body, prices, raw:full, createdAt:Date.now()};
+  return {id:uid(), date, site, type, level, title, body, prices, raw:t, createdAt:Date.now()};   // raw = 붙여넣은 원문 그대로
 }
 
 function parseBlocks(raw, mode){
@@ -1254,7 +1308,7 @@ function renderCalendar(){
 function thumbStrip(d, cls){
   const g = d.imgs || [];
   if(!g.length) return '';
-  return `<div class="imgstrip ${cls||''}">${g.slice(0,5).map(x=>`<span class="ith"><img src="${x.d}" alt=""></span>`).join('')}${g.length>5?`<span class="imgnote" style="align-self:center">+${g.length-5}</span>`:''}</div>`;
+  return `<div class="imgstrip ${cls||''}">${g.slice(0,5).map(x=>`<span class="ith"><img src="${imgSrc(x)}" alt=""></span>`).join('')}${g.length>5?`<span class="imgnote" style="align-self:center">+${g.length-5}</span>`:''}</div>`;
 }
 
 /* 카드 표지 — 사진이 있으면 사진, 없으면 내용이 바로 읽히는 색표지 */
@@ -1262,7 +1316,7 @@ const GLYPH = {price:'₩', caution:'!', notice:'공지', general:'메모'};
 function coverHtml(d){
   const flag = d.level==='high' ? '<span class="ic-badge">중요</span>' : '';
   if(d.imgs && d.imgs.length){
-    return `<span class="ic-cover"><img src="${d.imgs[0].d}" alt="">${d.imgs.length>1?`<i>사진 ${d.imgs.length}</i>`:''}${flag}</span>`;
+    return `<span class="ic-cover"><img src="${imgSrc(d.imgs[0])}" alt="">${d.imgs.length>1?`<i>사진 ${d.imgs.length}</i>`:''}${flag}</span>`;
   }
   const p = (d.prices||[])[0];
   if(p && p.after){
@@ -1483,7 +1537,7 @@ function renderDrafts(){
       <input class="t" type="text" value="${esc(d.title)}" data-i="${i}" data-f="title">
       ${d.body?`<div class="body">${esc(d.body)}</div>`:''}
       ${d.prices.length?`<div class="pchips">${d.prices.map(p=>`<span class="pchip">${priceText(p)}</span>`).join('')}</div>`:''}
-      ${(d.imgs&&d.imgs.length)?`<div class="imgstrip">${d.imgs.map((g,k)=>`<span class="ith"><img src="${g.d}" alt=""><button class="x" data-rmimg="${i}:${k}" title="사진 빼기">×</button></span>`).join('')}</div>`:''}
+      ${(d.imgs&&d.imgs.length)?`<div class="imgstrip">${d.imgs.map((g,k)=>`<span class="ith"><img src="${imgSrc(g)}" alt=""><button class="x" data-rmimg="${i}:${k}" title="사진 빼기">×</button></span>`).join('')}</div>`:''}
       ${(d.imgs&&d.imgs.length)?`<div class="imgnote">사진 ${d.imgs.length}장이 이 이슈에 함께 등록됩니다. 다른 이슈로 옮기려면 그 카드 위로 끌어다 놓으세요.</div>`:''}
     </div>`).join('');
 }
@@ -1655,8 +1709,8 @@ function openView(d){
           <div class="pnum">${p.before?`<span class="old">${won(p.before)}</span>`:''}<span class="new">${won(p.after)}원</span>${delta}</div>
         </div>`;
       }).join('')}</div>` : ''}
-      ${(d.imgs&&d.imgs.length)?`<div class="vimgs">${d.imgs.map(g=>`<img src="${g.d}" alt="" data-zoom="1">`).join('')}</div>`:''}
-      <div class="vbody">${formatBody(d.body || d.raw || '')}</div>
+      ${(d.imgs&&d.imgs.length)?`<div class="vimgs">${d.imgs.map(g=>`<img src="${imgSrc(g)}" alt="" data-zoom="1">`).join('')}</div>`:''}
+      <div class="vbody">${formatBody(d.raw || d.body || '')}</div>
     </div>
     <div class="bar">
       <button class="primary" id="vEdit">수정</button>
@@ -1728,7 +1782,7 @@ function openModal(item){
   const drawImgs = ()=>{
     const box = mask.querySelector('#mImgs');
     box.innerHTML = editing.imgs.length
-      ? `<div class="imgstrip">${editing.imgs.map((g,k)=>`<span class="ith"><img src="${g.d}" alt=""><button class="x" type="button" data-mrm="${k}">×</button></span>`).join('')}</div>`
+      ? `<div class="imgstrip">${editing.imgs.map((g,k)=>`<span class="ith"><img src="${imgSrc(g)}" alt=""><button class="x" type="button" data-mrm="${k}">×</button></span>`).join('')}</div>`
       : `<div class="imgnote" style="margin:0">첨부된 사진이 없습니다</div>`;
   };
   drawImgs();
@@ -1762,6 +1816,7 @@ function openModal(item){
       id: editing.id, date: $('#mDate').value || todayStr(), site: $('#mSite').value.trim(),
       type: $('#mType').value, level: $('#mLevel').value,
       title: $('#mTitle').value.trim() || '(제목 없음)', body: $('#mBody').value.trim(),
+      raw: ($('#mBody').value.trim() === (editing.body||'')) ? (editing.raw||'') : '',
       prices: a ? [{item:item2||'단가', before:b, after:a}] : [],
       imgs: editing.imgs || [],
       createdAt: editing.createdAt || Date.now(), updatedAt: Date.now()
@@ -1955,26 +2010,27 @@ $('#imgIn').onchange = async e=>{
   attachImgs(await filesToImgs(fs), 0);
 };
 
-/* Ctrl+V — 사진이 들어 있으면 등록 화면으로 */
+/* Ctrl+V — 복사한 글과 사진을 그대로 */
 document.addEventListener('paste', async e=>{
   if(document.querySelector('.mask')) return;        // 모달이 열려 있으면 모달이 처리
   const cd = e.clipboardData; if(!cd) return;
+
   const fs = [...(cd.items||[])].filter(i=>i.kind==='file' && /^image\//.test(i.type)).map(i=>i.getAsFile()).filter(Boolean);
-  const txt = cd.getData('text/plain') || '';
+  const html = cd.getData('text/html') || '';
+  const plain = cd.getData('text/plain') || '';
+  let text = plain, urls = [];
+  if(html){
+    const r = readPastedHtml(html);
+    urls = r.urls;
+    if(!text.trim() || r.text.length > text.length) text = r.text;   // 줄바꿈이 살아 있는 쪽을 쓴다
+  }
+  if(fs.length) urls = urls.filter(u=>/^https?:/i.test(u));          // 캡처 파일이 있으면 중복 방지
+
   const inField = /^(INPUT|TEXTAREA|SELECT)$/.test((e.target.tagName||'')) || e.target.isContentEditable;
-  if(!fs.length && inField) return;                  // 입력칸에 붙여넣는 건 그대로 둔다
-  if(!fs.length && !txt.trim()) return;
+  if(!fs.length && !urls.length && inField) return;  // 입력칸에 글만 붙여넣는 건 그대로 둔다
+  if(!fs.length && !urls.length && !text.trim()) return;
   e.preventDefault();
-  goAddTab();
-  if(txt.trim()){
-    const cur = $('#raw').value;
-    $('#raw').value = cur.trim() ? cur.replace(/\s+$/,'') + '\n\n' + txt.trim() : txt.trim();
-    reparse();
-  }
-  if(fs.length){
-    toast(`사진 ${fs.length}장을 넣는 중…`);
-    attachImgs(await filesToImgs(fs), 0);
-  }
+  await intake({text, files:fs, urls});
 });
 
 /* 전체 이슈 패널 */
