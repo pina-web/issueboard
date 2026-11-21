@@ -121,7 +121,7 @@
     content:"";position:absolute;left:0;top:13px;bottom:13px;width:3px;border-radius:0 3px 3px 0;background:var(--type-c,var(--general))
   }
   .lead-meta{display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap}
-  .lead-t{font-size:16px;font-weight:750;letter-spacing:-.022em;line-height:1.45}
+  .lead-t{font-size:16px;font-weight:750;letter-spacing:-.022em;line-height:1.45;white-space:pre-wrap;word-break:break-word}
   .lead-b{font-size:14px;line-height:1.68;color:var(--muted2);margin-top:6px;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
 
   .chip{
@@ -188,7 +188,11 @@
   .draft input[type=text],.draft select,.draft input[type=date]{
     border:1px solid var(--line);border-radius:6px;padding:7px 10px;font-size:14px;background:var(--surface)
   }
-  .draft .t{width:100%;font-size:15px;font-weight:700;margin-bottom:8px}
+  .draft .t{
+    width:100%;font-size:15px;font-weight:700;margin-bottom:8px;line-height:1.5;resize:vertical;
+    border:1px solid var(--line);border-radius:6px;padding:8px 10px;background:var(--surface);
+    font-family:inherit;outline:0
+  }
   .draft .body{font-size:14px;color:var(--muted2);white-space:pre-wrap;line-height:1.75;max-height:220px;overflow:auto}
   .draft .pchips{display:flex;gap:7px;flex-wrap:wrap;margin-top:10px}
   .pchip{font-family:var(--mono);font-size:13px;background:#E1F0ED;color:var(--price);padding:4px 9px;border-radius:5px;font-weight:600}
@@ -208,7 +212,7 @@
   .row:last-child{border-bottom:0}
   .row::before{content:"";position:absolute;left:0;top:14px;bottom:14px;width:3px;background:var(--type-c,var(--general));border-radius:0 3px 3px 0}
   .row .main{flex:1;min-width:0}
-  .row .rt{font-size:16px;font-weight:750;letter-spacing:-.022em;line-height:1.45}
+  .row .rt{font-size:16px;font-weight:750;letter-spacing:-.022em;line-height:1.45;white-space:pre-wrap;word-break:break-word}
   .row .rb{font-size:14px;line-height:1.7;color:var(--muted2);white-space:pre-wrap;margin-top:6px}
   .row .side{flex:none;display:flex;flex-direction:column;align-items:flex-end;gap:7px}
 
@@ -384,8 +388,8 @@
 .icard .ic-meta .date{font-size:12px}
 .icard .ic-site{display:inline-block;font-size:12px;font-weight:700;color:#2E3742;background:#E7ECF3;border-radius:5px;padding:2px 7px;margin-bottom:5px}
 .icard .ic-t{
-  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
-  font-size:14px;font-weight:750;letter-spacing:-.02em;line-height:1.42;min-height:2.84em
+  display:block;font-size:14px;font-weight:750;letter-spacing:-.02em;line-height:1.42;
+  min-height:2.84em;white-space:pre-wrap;word-break:break-word
 }
 .icard .ic-b{display:none}
 .icard .ic-p{display:block;font-family:var(--mono);font-size:12.5px;font-weight:700;color:var(--price);margin-top:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -415,7 +419,7 @@
 .allgrid.dense-list .ic-body{flex:1;min-width:0;padding:0;display:flex;align-items:center;gap:9px;flex-wrap:wrap}
 .allgrid.dense-list .ic-meta{margin:0}
 .allgrid.dense-list .ic-site{margin:0}
-.allgrid.dense-list .ic-t{-webkit-line-clamp:1;flex:1;min-width:140px;min-height:0}
+.allgrid.dense-list .ic-t{flex:1;min-width:200px;min-height:0}
 .allgrid.dense-list .ic-p{margin:0}
 
 /* 한눈 요약 칩 */
@@ -1178,7 +1182,7 @@ function guessSite(text){
   for(const k of known){ if(text.includes(k)) return k; }
   const re = new RegExp('([가-힣A-Za-z0-9]{2,12}\\s*' + SITE_SUFFIX + '(?:\\s*\\d{1,2}\\s*(?:차|단지|블록|BL))?)');
   m = text.match(re);
-  if(m) return m[1].replace(/\s+/g,' ').trim();
+  if(m) return m[1].replace(/^[\d\s./\-]+/,'').replace(/\s+/g,' ').trim();   // 앞에 붙은 날짜·번호 제거
   return '';
 }
 
@@ -1239,22 +1243,10 @@ function parseOne(text){
   const level = guessLevel(t);
   const prices = extractPrices(t, /\t/.test(t));   // 표에서 온 글은 엄격하게
 
-  const lines = t.split('\n').map(stripMeta).filter(Boolean);
-  const full = lines.join('\n');
-  let first = lines[0] || t;
-  if(site && first.startsWith(site)) first = first.slice(site.length).replace(/^[\s\-–:/|,]+/,'');
-  first = first.replace(/^[\s\-–:/|,]+/,'').trim();
-
-  let title, body;
-  if(first.length > 58){
-    // 긴 문장은 첫 문장까지만 제목으로, 원문은 통째로 본문에 보관
-    const m = first.match(/^[\s\S]{12,58}?(?:다\.|요\.|음\.|함\.|[.!?])(?=\s|$)/);
-    if(m){ title = m[0].trim(); body = full.slice(full.indexOf(m[0]) + m[0].length).trim(); }
-    else  { title = first.slice(0,56).trim() + '…'; body = full; }
-  }else{
-    title = first;
-    body = lines.slice(1).join('\n');
-  }
+  /* 제목은 손대지 않는다 — 붙여넣은 첫 줄을 그대로 쓴다 */
+  const lines = t.split('\n').map(l=>l.trim()).filter(Boolean);
+  let title = lines[0] || t;
+  let body = lines.slice(1).join('\n');
   if(!title) title = TYPES[type].label;
 
   return {id:uid(), date, site, type, level, title, body, prices, raw:t, createdAt:Date.now()};   // raw = 붙여넣은 원문 그대로
@@ -1616,7 +1608,7 @@ function renderDrafts(){
         <input type="text" placeholder="현장명" value="${esc(d.site)}" data-i="${i}" data-f="site" style="width:130px">
         <button class="del" data-rm="${i}">제외</button>
       </div>
-      <input class="t" type="text" value="${esc(d.title)}" data-i="${i}" data-f="title">
+      <textarea class="t" rows="${Math.min(6, Math.ceil((d.title||'').length/34) || 1)}" data-i="${i}" data-f="title">${esc(d.title)}</textarea>
       ${d.body?`<div class="body">${esc(d.body)}</div>`:''}
       ${d.prices.length?`<div class="pchips">${d.prices.map(p=>`<span class="pchip">${priceText(p)}</span>`).join('')}</div>`:''}
       ${d.html?`<div class="vhtml mini">${d.html}</div>`:''}
@@ -1834,7 +1826,7 @@ function openModal(item){
         <div class="fld"><label>분류</label><select id="mType">${Object.entries(TYPES).map(([k,v])=>`<option value="${k}" ${editing.type===k?'selected':''}>${v.label}</option>`).join('')}</select></div>
         <div class="fld"><label>중요도</label><select id="mLevel">${Object.entries(LEVELS).map(([k,v])=>`<option value="${k}" ${editing.level===k?'selected':''}>${v}</option>`).join('')}</select></div>
       </div>
-      <div class="fld"><label>제목</label><input type="text" id="mTitle" value="${esc(editing.title)}" placeholder="한 줄 요약"></div>
+      <div class="fld"><label>제목</label><textarea id="mTitle" rows="2" style="font-weight:700" placeholder="제목">${esc(editing.title)}</textarea></div>
       <div class="fld"><label>내용</label><textarea id="mBody" placeholder="상세 내용">${esc(editing.body)}</textarea></div>
       <div class="fld"><label>사진 (선택)</label>
         <div id="mImgs"></div>
