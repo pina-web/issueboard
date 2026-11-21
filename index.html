@@ -1603,6 +1603,7 @@ function openModal(item){
   mask.addEventListener('dragover', e=>{ e.preventDefault(); });
   mask.addEventListener('drop', async e=>{
     const fs = [...(e.dataTransfer.files||[])].filter(f=>/^image\//.test(f.type));
+    hideDragUI();
     if(!fs.length) return;
     e.preventDefault(); e.stopPropagation();
     editing.imgs.push(...await filesToImgs(fs)); drawImgs();
@@ -1716,6 +1717,7 @@ $('#drafts').addEventListener('drop', async e=>{
   const card = e.target.closest('.draft'); if(!card) return;
   const fs = [...(e.dataTransfer.files||[])].filter(f=>/^image\//.test(f.type));
   $$('.draft').forEach(x=>x.classList.remove('droptarget'));
+  hideDragUI();
   if(!fs.length) return;
   e.preventDefault(); e.stopPropagation();
   const idx = $$('.draft').indexOf(card);
@@ -1768,30 +1770,35 @@ document.body.addEventListener('click', e=>{
 });
 
 /* ─────────── 드래그앤드롭 · 붙여넣기 ─────────── */
-let dragDepth = 0;
 const hasFiles = dt => !!dt && [...(dt.types||[])].some(t=> t==='Files' || t==='text/plain' || t==='text/uri-list');
+let dragTimer = null;
 
-window.addEventListener('dragenter', e=>{
-  if(!hasFiles(e.dataTransfer)) return;
-  dragDepth++;
-  $('#dropOv').hidden = false;
-  $('#dropZone').classList.add('on');
-});
+function showDragUI(){
+  const ov = $('#dropOv'); if(ov) ov.hidden = false;
+  const dz = $('#dropZone'); if(dz) dz.classList.add('on');
+  clearTimeout(dragTimer);
+  dragTimer = setTimeout(hideDragUI, 1400);   // 끌기가 끊겨도 안내가 남지 않도록
+}
+function hideDragUI(){
+  clearTimeout(dragTimer); dragTimer = null;
+  const ov = $('#dropOv'); if(ov) ov.hidden = true;
+  const dz = $('#dropZone'); if(dz) dz.classList.remove('on');
+}
+
+window.addEventListener('dragenter', e=>{ if(hasFiles(e.dataTransfer)) showDragUI(); });
 window.addEventListener('dragover', e=>{
   if(!hasFiles(e.dataTransfer)) return;
   e.preventDefault();
   try{ e.dataTransfer.dropEffect = 'copy'; }catch(err){}
+  showDragUI();
 });
-window.addEventListener('dragleave', e=>{
-  if(--dragDepth > 0) return;
-  dragDepth = 0;
-  $('#dropOv').hidden = true;
-  $('#dropZone').classList.remove('on');
-});
+/* 어디에 놓든(초안 카드·모달 포함) 안내는 반드시 닫는다 — 가로채기 단계에서 처리 */
+window.addEventListener('drop', hideDragUI, true);
+window.addEventListener('dragend', hideDragUI, true);
+window.addEventListener('dragleave', e=>{ if(!e.relatedTarget) hideDragUI(); }, true);
+
 window.addEventListener('drop', async e=>{
-  dragDepth = 0;
-  $('#dropOv').hidden = true;
-  $('#dropZone').classList.remove('on');
+  hideDragUI();
   if(!e.dataTransfer) return;
   e.preventDefault();
   await handleDropped(e.dataTransfer);
