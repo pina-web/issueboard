@@ -489,6 +489,15 @@
 .vhtml.mini table{font-size:12.5px}
 .vimgs{display:grid;gap:10px;margin:14px 0 4px}
 .vimgs img{width:100%;border-radius:12px;border:1px solid var(--line);cursor:zoom-in;display:block}
+/* 공유 상태 띠 */
+.sharebar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;border-radius:12px;padding:12px 16px;margin-top:18px;font-size:14px;line-height:1.6}
+.sharebar.warn{background:#FFF7E8;border:1px solid #F0DCB4;color:#7A5A1E}
+.sharebar.ok{background:#EDF7F3;border:1px solid #BEE2D3;color:#1C5F46}
+.sharebar.bad{background:#FDF0F0;border:1px solid #F0C9C9;color:#8C2626}
+.sharebar b{font-weight:800}
+.sharebar .sp{margin-left:auto;display:flex;gap:8px;flex-wrap:wrap}
+.sharebar button{border:1px solid rgba(0,0,0,.14);background:#fff;border-radius:8px;padding:7px 13px;font-size:13.5px;font-weight:700;color:inherit}
+.sharebar button:hover{background:rgba(255,255,255,.65)}
 .lightbox{position:fixed;inset:0;z-index:9500;background:rgba(10,12,15,.92);display:grid;place-items:center;padding:20px}
 .lightbox img{max-width:100%;max-height:100%;border-radius:8px}
 @media(max-width:900px){
@@ -582,6 +591,7 @@ window.arteNavSet();
 </header>
 
 <div class="wrap">
+  <div class="sharebar" id="shareBar" hidden></div>
   <nav class="tabs" role="tablist">
     <button class="tab" role="tab" data-tab="dash" aria-selected="true">대시보드</button>
     <button class="tab" role="tab" data-tab="add">이슈 등록</button>
@@ -721,18 +731,22 @@ const KEY = 'arte_issue_checker_v1';
 const mem = {};
 const store = {
   async get(){
+    try{ const v = await idb.get('data'); if(v) return v; }catch(e){}
     try{
-      if(window.storage){ const r = await window.storage.get(KEY); return r? JSON.parse(r.value):null; }
+      if(window.storage){ const r = await window.storage.get(KEY); if(r) return JSON.parse(r.value); }
     }catch(e){}
     try{ const s = localStorage.getItem(KEY); if(s) return JSON.parse(s); }catch(e){}
     return mem[KEY] || null;
   },
   async set(v){
-    const s = JSON.stringify(v);
     mem[KEY]=v;
-    try{ if(window.storage){ await window.storage.set(KEY,s); return true; } }catch(e){}
-    try{ localStorage.setItem(KEY,s); return true; }catch(e){ return false; }
-  }
+    let ok = false;
+    try{ await idb.set('data', v); ok = true; }catch(e){}          // 사진까지 넉넉히 들어가는 저장소
+    try{ localStorage.setItem(KEY, JSON.stringify(v)); ok = true; }catch(e){}
+    return ok;
+  },
+  async getTomb(){ try{ return (await idb.get('tomb')) || []; }catch(e){ return []; } },
+  async setTomb(v){ try{ await idb.set('tomb', v); }catch(e){} }
 };
 
 /* ─── 파일 연동(공유 폴더 저장) ─── */
@@ -780,8 +794,38 @@ const idb = {
   }
 };
 
+let TOMB = [];          // 삭제 기록 {id, at} — 다른 PC의 삭제도 따라가게 한다
+
 function payload(){
-  return {app:'arte-issue-checker', version:2, savedAt:new Date().toISOString(), items:DATA};
+  return {app:'arte-issue-checker', version:3, savedAt:new Date().toISOString(), items:DATA, deleted:TOMB};
+}
+
+function mergeTomb(a, b){
+  const m = new Map();
+  [...(a||[]), ...(b||[])].forEach(t=>{
+    if(!t || !t.id) return;
+    const prev = m.get(t.id);
+    if(!prev || (t.at||0) > (prev.at||0)) m.set(t.id, {id:t.id, at:t.at||Date.now()});
+  });
+  const cut = Date.now() - 180*86400000;                 // 180일 지난 기록은 정리
+  return [...m.values()].filter(t=> t.at >= cut);
+}
+
+function applyTomb(items){
+  if(!TOMB.length) return items;
+  const m = new Map(TOMB.map(t=>[t.id, t.at||0]));
+  return items.filter(it=>{
+    const at = m.get(it.id);
+    return at == null || (it.updatedAt||it.createdAt||0) > at;   // 지운 뒤에 다시 고쳤으면 살린다
+  });
+}
+
+async function removeItems(ids){
+  const set = new Set(ids);
+  const now = Date.now();
+  TOMB = mergeTomb(TOMB, [...set].map(id=>({id, at:now})));
+  DATA = DATA.filter(d=> !set.has(d.id));
+  await store.setTomb(TOMB);
 }
 
 /* 같은 id는 최근에 고친 쪽을 남기고 합친다 */
@@ -809,11 +853,26 @@ async function writeFile(){
   if(!fileHandle) return;
   if(!await ensurePermission('readwrite')) return;
   try{
+    /* 같은 파일을 쓰는 다른 사람 내용을 먼저 합쳐서 덮어쓰지 않게 한다 */
+    try{
+      const f = await fileHandle.getFile();
+      const txt = await f.text();
+      if(txt.trim()){
+        const j = JSON.parse(txt);
+        const it = Array.isArray(j) ? j : j.items;
+        if(Array.isArray(it)){
+          TOMB = mergeTomb(j.deleted || [], TOMB);
+          DATA = applyTomb(mergeItems(it, DATA));
+        }
+      }
+    }catch(e){}
     const w = await fileHandle.createWritable();
     await w.write(JSON.stringify(payload(), null, 2));
     await w.close();
-    lastSync = new Date(); linkState = 'linked'; renderLink();
-  }catch(e){ linkState = 'error'; renderLink(); }
+    lastSync = new Date(); linkState = 'linked';
+    await store.set(DATA); await store.setTomb(TOMB);
+    renderLink(); renderShareBar();
+  }catch(e){ linkState = 'error'; renderLink(); renderShareBar(); }
 }
 
 function scheduleWrite(){
@@ -834,14 +893,15 @@ async function pullFile({silent}={}){
       const items = Array.isArray(j) ? j : j.items;
       if(Array.isArray(items)){
         const before = DATA.length;
-        DATA = mergeItems(items, DATA);
+        TOMB = mergeTomb(j.deleted || [], TOMB);
+        DATA = applyTomb(mergeItems(items, DATA));
         lastSync = new Date(); linkState = 'linked';
-        renderAll(); renderLink();
-        await store.set(DATA);
-        if(!silent && DATA.length !== before) toast(`파일에서 ${DATA.length - before}건을 불러왔습니다`);
+        renderAll(); renderLink(); renderShareBar();
+        await store.set(DATA); await store.setTomb(TOMB);
+        if(!silent && DATA.length !== before) toast(`공유 파일에서 ${Math.abs(DATA.length - before)}건을 반영했습니다`);
       }
     }
-  }catch(e){ linkState = 'error'; renderLink(); }
+  }catch(e){ linkState = 'error'; renderLink(); renderShareBar(); }
   syncing = false;
 }
 
@@ -875,6 +935,47 @@ async function unlinkFile(){
   fileHandle = null; linkState = 'none'; lastSync = null;
   await idb.del('fileHandle');
   renderLink(); toast('연결을 해제했습니다');
+}
+
+function syncAgo(){
+  if(!lastSync) return '';
+  const sec = Math.round((Date.now() - lastSync.getTime())/1000);
+  if(sec < 60) return '방금 동기화';
+  if(sec < 3600) return `${Math.floor(sec/60)}분 전 동기화`;
+  return `${String(lastSync.getHours()).padStart(2,'0')}:${String(lastSync.getMinutes()).padStart(2,'0')} 동기화`;
+}
+
+function renderShareBar(){
+  const el = $('#shareBar'); if(!el) return;
+  if(linkState === 'linked'){
+    el.hidden = false; el.className = 'sharebar ok';
+    el.innerHTML = `<span>👥 <b>${esc(fileHandle ? fileHandle.name : '공유 파일')}</b> 로 팀과 같은 내용을 보고 있습니다 · ${syncAgo()}</span>
+      <span class="sp"><button id="sbPull">지금 새로고침</button><button id="sbOpen">연결 바꾸기</button></span>`;
+  }else if(linkState === 'need-permission'){
+    el.hidden = false; el.className = 'sharebar bad';
+    el.innerHTML = `<span>⚠️ 공유 파일 접근 권한이 끊겼습니다. 다시 연결해야 팀 내용이 반영됩니다.</span>
+      <span class="sp"><button id="sbOpen">다시 연결</button></span>`;
+  }else if(linkState === 'error'){
+    el.hidden = false; el.className = 'sharebar bad';
+    el.innerHTML = `<span>⚠️ 공유 파일을 읽고 쓰지 못했습니다. 폴더 동기화 상태를 확인해 주세요.</span>
+      <span class="sp"><button id="sbPull">다시 시도</button><button id="sbOpen">연결 바꾸기</button></span>`;
+  }else{
+    el.hidden = false; el.className = 'sharebar warn';
+    el.innerHTML = `<span>🔒 지금은 <b>이 PC에서만</b> 보입니다. 팀이 같은 내용을 보려면 공유 폴더(SharePoint·OneDrive)의 데이터 파일에 연결하세요.</span>
+      <span class="sp"><button id="sbOpen">공유 파일 연결</button></span>`;
+  }
+}
+
+/* 열려 있는 동안 주기적으로 공유 파일을 확인한다 */
+function startAutoSync(){
+  setInterval(()=>{
+    if(!fileHandle || linkState !== 'linked') return;
+    if(document.visibilityState !== 'visible') return;
+    if(syncing || Date.now() - lastPull < 12000) return;
+    lastPull = Date.now();
+    pullFile({silent:true});
+  }, 15000);
+  setInterval(()=>{ if(linkState === 'linked') renderShareBar(); }, 60000);
 }
 
 function renderLink(){
@@ -1803,7 +1904,7 @@ function openView(d){
   };
   mask.querySelector('#vDel').onclick = async ()=>{
     if(!await confirmDelete(d)) return;
-    DATA = DATA.filter(x=>x.id!==d.id);
+    await removeItems([d.id]);
     await persist(); close(); renderAll(); toast('삭제했습니다');
   };
 }
@@ -1903,15 +2004,16 @@ function openModal(item){
   };
   if(item) $('#mDel').onclick = async ()=>{
     if(!await confirmDelete(item)) return;
-    DATA = DATA.filter(d=>d.id!==item.id); await persist(); mask.remove(); renderAll(); toast('삭제했습니다');
+    await removeItems([item.id]); await persist(); mask.remove(); renderAll(); toast('삭제했습니다');
   };
 }
 
 async function persist(){
   DATA.forEach(d=>{ if(!d.updatedAt) d.updatedAt = d.createdAt || Date.now(); });
   const ok = await store.set(DATA);
-  if(ok === false) toast('사진이 많아 이 브라우저 저장 공간이 찼습니다 — 저장 파일 연결이나 백업을 사용해 주세요');
+  if(ok === false) toast('이 브라우저에 저장하지 못했습니다 — 공유 파일 연결을 확인해 주세요');
   scheduleWrite();
+  renderShareBar();
 }
 
 /* ─────────── 이벤트 ─────────── */
@@ -2026,7 +2128,7 @@ document.body.addEventListener('click', e=>{
     const d = DATA.find(x=>x.id===del.dataset.del);
     if(d) confirmDelete(d).then(async ok=>{
       if(!ok) return;
-      DATA = DATA.filter(x=>x.id!==d.id);
+      await removeItems([d.id]);
       await persist(); renderAll(); toast('삭제했습니다');
     });
     return;
@@ -2152,6 +2254,10 @@ document.body.addEventListener('click', e=>{
 });
 
 $('#btnLink').onclick = openLinkDialog;
+$('#shareBar').addEventListener('click', e=>{
+  if(e.target.id === 'sbOpen') return openLinkDialog();
+  if(e.target.id === 'sbPull'){ lastPull = Date.now(); pullFile(); }
+});
 $('#linkStat').onclick = openLinkDialog;
 
 $('#btnExport').onclick = ()=>{
@@ -2172,7 +2278,9 @@ $('#fileIn').onchange = e=>{
       const items = Array.isArray(j) ? j : j.items;
       if(!Array.isArray(items)) throw 0;
       const before = DATA.length;
-      DATA = mergeItems(items, DATA);           // 기존 내용을 지우지 않고 합친다
+      TOMB = mergeTomb(j.deleted || [], TOMB);
+      DATA = applyTomb(mergeItems(items, DATA));   // 기존 내용을 지우지 않고 합친다
+      await store.setTomb(TOMB);
       await persist(); renderAll();
       toast(`불러왔습니다 (새 이슈 ${DATA.length - before}건)`);
     }catch(err){ toast('이 파일은 읽을 수 없습니다'); }
@@ -2198,11 +2306,29 @@ window.addEventListener('beforeunload', ()=>{ if(fileHandle) writeFile(); });
     const dz = localStorage.getItem('arte_issue_dense');
     if(dz){ allDense = dz; [...$('#allDense').children].forEach(x=>x.setAttribute('aria-pressed', x.dataset.d===dz)); }
   }catch(e){}
+  TOMB = await store.getTomb();
   const saved = await store.get();
-  DATA = Array.isArray(saved) ? saved : [];
+  DATA = applyTomb(Array.isArray(saved) ? saved : []);
   renderDrafts();
   renderAll();
   renderLink();
+  renderShareBar();
+  startAutoSync();
+
+  /* 저장소에 data.json 이 올라와 있으면 모두가 같은 기본 내용을 본다 */
+  try{
+    const res = await fetch('data.json?t=' + Date.now(), {cache:'no-store'});
+    if(res.ok){
+      const j = await res.json();
+      const items = Array.isArray(j) ? j : j.items;
+      if(Array.isArray(items) && items.length){
+        const before = DATA.length;
+        TOMB = mergeTomb(j.deleted || [], TOMB);
+        DATA = applyTomb(mergeItems(items, DATA));
+        if(DATA.length !== before){ await store.set(DATA); await store.setTomb(TOMB); renderAll(); }
+      }
+    }
+  }catch(e){}
 
   // 이전에 연결해 둔 파일이 있으면 복구
   if(supportsFS){
